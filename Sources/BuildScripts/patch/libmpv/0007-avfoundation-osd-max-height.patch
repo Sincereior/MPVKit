@@ -1,0 +1,42 @@
+diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
+index 8155d7a..a6891e2 100644
+--- a/video/out/vo_avfoundation.m
++++ b/video/out/vo_avfoundation.m
+@@ -88,6 +88,9 @@ struct priv {
+     
+     // Display resolution for scaling subtitles (0 = no upscaling)
+     int display_height;
++
++    // Cap on the OSD/subtitle render height (0 = render at full size)
++    int osd_max_height;
+ };
+ 
+ // Helper to sync OSD layer frame with display layer bounds
+@@ -605,12 +608,15 @@ static void render_osd(struct vo *vo, double pts)
+     if (w <= 0 || h <= 0)
+         return;
+     
+-    // In composite mode, render subtitles at video resolution for stability
+     int render_w = w;
+     int render_h = h;
+-    
+-    // No additional capping/scaling in composite mode; keep it fixed to video size
+-    
++
++    // Render below the cap and let composite_frame() scale the result back up
++    if (p->osd_max_height > 0 && h > p->osd_max_height) {
++        render_w = MPMAX(1, (int)((double)w * p->osd_max_height / h + 0.5));
++        render_h = p->osd_max_height;
++    }
++
+     p->osd_w = render_w;
+     p->osd_h = render_h;
+     
+@@ -1261,6 +1267,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
+ #define OPT_BASE_STRUCT struct priv
+ static const struct m_option options[] = {
+     {"composite-osd", OPT_BOOL(composite_osd)},
++    {"osd-max-height", OPT_INT(osd_max_height), M_RANGE(0, 16384)},
+     {0},
+ };
+ 
