@@ -57,3 +57,4 @@ index 8155d7a..2c11ad2 100644
 +    {"osd-render-height", OPT_INT(osd_render_height), M_RANGE(0, 16384)},
      {0},
  };
+ 
