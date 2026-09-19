@@ -5,7 +5,7 @@ on:
     inputs:
       version:
         description: 'Release tag name'
-        default: '0.41.0-av5'
+        default: '0.41.0-av6'
   pull_request:
     branches:
       - main
@@ -29,7 +29,7 @@ jobs:
         run: |
           VERSION="$INPUT_VERSION"
           if [ -z "$VERSION" ]; then
-            VERSION="0.41.0-av5"
+            VERSION="0.41.0-av6"
           fi
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
 

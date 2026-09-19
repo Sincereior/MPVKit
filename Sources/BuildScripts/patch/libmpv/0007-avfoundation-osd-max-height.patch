@@ -1,5 +1,5 @@
 diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
-index 8155d7a..a6891e2 100644
+index 8155d7a..2c11ad2 100644
 --- a/video/out/vo_avfoundation.m
 +++ b/video/out/vo_avfoundation.m
 @@ -88,6 +88,9 @@ struct priv {
@@ -7,8 +7,8 @@ index 8155d7a..a6891e2 100644
      // Display resolution for scaling subtitles (0 = no upscaling)
      int display_height;
 +
-+    // Cap on the OSD/subtitle render height (0 = render at full size)
-+    int osd_max_height;
++    // Fixed subtitle render height in composite mode (0 = video height)
++    int osd_render_height;
  };
  
  // Helper to sync OSD layer frame with display layer bounds
@@ -23,20 +23,37 @@ index 8155d7a..a6891e2 100644
 -    // No additional capping/scaling in composite mode; keep it fixed to video size
 -    
 +
-+    // Render below the cap and let composite_frame() scale the result back up
-+    if (p->osd_max_height > 0 && h > p->osd_max_height) {
-+        render_w = MPMAX(1, (int)((double)w * p->osd_max_height / h + 0.5));
-+        render_h = p->osd_max_height;
++    // Render at the requested height whatever the video size is
++    if (p->composite_osd && p->osd_render_height > 0) {
++        render_h = p->osd_render_height;
++        render_w = MPMAX(1, (int)((double)w * render_h / h + 0.5));
 +    }
 +
      p->osd_w = render_w;
      p->osd_h = render_h;
      
-@@ -1261,6 +1267,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
+@@ -666,10 +672,15 @@ static CVPixelBufferRef composite_frame(struct vo *vo, CVPixelBufferRef videoBuf
+     size_t videoW = CVPixelBufferGetWidth(videoBuffer);
+     size_t videoH = CVPixelBufferGetHeight(videoBuffer);
+ 
+-    // Use the video frame size for composite output to keep a stable format
+-    // during playback and avoid display layer flicker/resizing.
++    // Output stays at the video frame size, unless subtitles are rendered
++    // larger than the video. Then the video is scaled up to match so they
++    // stay 1:1.
+     size_t outW = videoW;
+     size_t outH = videoH;
++    if (p->osd_render_height > 0 && (size_t)p->osd_h > videoH) {
++        outW = p->osd_w;
++        outH = p->osd_h;
++    }
+     
+     // Detect original pixel format to preserve quality
+     OSType sourceFormat = CVPixelBufferGetPixelFormatType(videoBuffer);
+@@ -1261,6 +1272,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
  #define OPT_BASE_STRUCT struct priv
  static const struct m_option options[] = {
      {"composite-osd", OPT_BOOL(composite_osd)},
-+    {"osd-max-height", OPT_INT(osd_max_height), M_RANGE(0, 16384)},
++    {"osd-render-height", OPT_INT(osd_render_height), M_RANGE(0, 16384)},
      {0},
  };
- 
