@@ -14,10 +14,10 @@ Pod::Spec.new do |s|
     labels mpv cannot map instead of going silent.
   DESC
 
-  s.homepage         = 'https://github.com/Smearedo/MPVKit'
+  s.homepage         = 'https://github.com/Sincereior/MPVKit'
   s.license          = { :type => 'GPL-3.0', :text => 'GPL-3.0. See https://www.gnu.org/licenses/gpl-3.0.html' }
   s.author           = { 'streamyfin' => 'https://github.com/streamyfin' }
-  s.source           = { :http => 'https://github.com/Smearedo/MPVKit/releases/download/0.41.0-av6/MPVKit.xcframework.zip' }
+  s.source           = { :http => 'https://github.com/Sincereior/MPVKit/releases/download/0.41.0-av6/MPVKit.xcframework.zip' }
 
   s.ios.deployment_target  = '14.0'
   s.tvos.deployment_target = '14.0'
