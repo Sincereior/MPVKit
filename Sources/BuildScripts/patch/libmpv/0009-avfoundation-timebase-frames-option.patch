@@ -1,0 +1,73 @@
+diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
+index 82259ce..1ff39c3 100644
+--- a/video/out/vo_avfoundation.m
++++ b/video/out/vo_avfoundation.m
+@@ -91,6 +91,10 @@ struct priv {
+ 
+     // Fixed subtitle render height in composite mode (0 = video height)
+     int osd_render_height;
++
++    // Schedule frames on the layer's control timebase instead of displaying
++    // them immediately (the behaviour before 0008)
++    bool timebase_frames;
+ };
+ 
+ // Helper to sync OSD layer frame with display layer bounds
+@@ -919,7 +923,8 @@ static void flip_page(struct vo *vo)
+ // jump back. A frame stamped ahead of a timebase that jumps back stays queued
+ // and is shown again when the timebase reaches its timestamp: a stale frame,
+ // with its burned-in subtitles, flashing a moment after a seek or a stall.
+-static bool enqueue_pixel_buffer(struct vo *vo, CVPixelBufferRef pixbuf)
++static bool enqueue_pixel_buffer(struct vo *vo, CVPixelBufferRef pixbuf,
++                                 bool immediately)
+ {
+     struct priv *p = vo->priv;
+ 
+@@ -945,12 +950,14 @@ static bool enqueue_pixel_buffer(struct vo *vo, CVPixelBufferRef pixbuf)
+         return false;
+     }
+ 
+-    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(buf, YES);
+-    CFDictionarySetValue(
+-        (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0),
+-        kCMSampleAttachmentKey_DisplayImmediately,
+-        kCFBooleanTrue
+-    );
++    if (immediately || !timebase) {
++        CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(buf, YES);
++        CFDictionarySetValue(
++            (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0),
++            kCMSampleAttachmentKey_DisplayImmediately,
++            kCFBooleanTrue
++        );
++    }
+ 
+     [p->displayLayer enqueueSampleBuffer:buf];
+     CFRelease(buf);
+@@ -1057,7 +1064,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+         }
+ 
+ error:
+-        if (!enqueue_pixel_buffer(vo, finalBuffer)) {
++        if (!enqueue_pixel_buffer(vo, finalBuffer, !p->timebase_frames)) {
+             if (needsRelease)
+                 CVPixelBufferRelease(finalBuffer);
+             if (pixbufNeedsRelease)
+@@ -1237,7 +1244,8 @@ static int control(struct vo *vo, uint32_t request, void *data)
+             if (pixbuf) {
+                 CVPixelBufferRef composited = composite_frame(vo, pixbuf);
+                 if (composited) {
+-                    enqueue_pixel_buffer(vo, composited);
++                    // Paused: show the updated subtitles now, whatever the timebase.
++                    enqueue_pixel_buffer(vo, composited, true);
+                     CVPixelBufferRelease(composited);
+                 }
+ 
+@@ -1258,6 +1266,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
+ static const struct m_option options[] = {
+     {"composite-osd", OPT_BOOL(composite_osd)},
+     {"osd-render-height", OPT_INT(osd_render_height), M_RANGE(0, 16384)},
++    {"timebase-frames", OPT_BOOL(timebase_frames)},
+     {0},
+ };
+ 
