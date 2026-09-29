@@ -1,0 +1,156 @@
+diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
+index 2c11ad2..82259ce 100644
+--- a/video/out/vo_avfoundation.m
++++ b/video/out/vo_avfoundation.m
+@@ -911,6 +911,52 @@ static void flip_page(struct vo *vo)
+     // next draw_frame, and released on uninit.
+ }
+ 
++// Hand a finished frame to the display layer for immediate display.
++//
++// mpv decides when a frame is due, so the layer must not schedule it as well.
++// The control timebase belongs to the host (it drives the PiP progress UI and is
++// only re-synced on large drifts), so it can run ahead of the content and later
++// jump back. A frame stamped ahead of a timebase that jumps back stays queued
++// and is shown again when the timebase reaches its timestamp: a stale frame,
++// with its burned-in subtitles, flashing a moment after a seek or a stall.
++static bool enqueue_pixel_buffer(struct vo *vo, CVPixelBufferRef pixbuf)
++{
++    struct priv *p = vo->priv;
++
++    CMTimebaseRef timebase = [p->displayLayer controlTimebase];
++    CMSampleTimingInfo info = {
++        .presentationTimeStamp = timebase ? CMTimebaseGetTime(timebase) : kCMTimeInvalid,
++        .duration = kCMTimeInvalid,
++        .decodeTimeStamp = kCMTimeInvalid
++    };
++
++    CMFormatDescriptionRef format = NULL;
++    OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(NULL, pixbuf, &format);
++    if (err != noErr || !format) {
++        MP_ERR(vo, "Failed to create format description: %d\n", (int)err);
++        return false;
++    }
++
++    CMSampleBufferRef buf = NULL;
++    err = CMSampleBufferCreateReadyWithImageBuffer(NULL, pixbuf, format, &info, &buf);
++    CFRelease(format);
++    if (err != noErr || !buf) {
++        MP_ERR(vo, "Failed to create sample buffer: %d\n", (int)err);
++        return false;
++    }
++
++    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(buf, YES);
++    CFDictionarySetValue(
++        (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0),
++        kCMSampleAttachmentKey_DisplayImmediately,
++        kCFBooleanTrue
++    );
++
++    [p->displayLayer enqueueSampleBuffer:buf];
++    CFRelease(buf);
++    return true;
++}
++
+ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+ {
+     @autoreleasepool {
+@@ -1011,34 +1057,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+         }
+ 
+ error:
+-        // Create and enqueue sample buffer
+-        CMTimebaseRef timebase = [p->displayLayer controlTimebase];
+-        CMTime presentationTime = timebase ? CMTimebaseGetTime(timebase) : kCMTimeInvalid;
+-        
+-        CMSampleTimingInfo info = {
+-            .presentationTimeStamp = presentationTime,
+-            .duration = kCMTimeInvalid,
+-            .decodeTimeStamp = kCMTimeInvalid
+-        };
+-
+-        CMSampleBufferRef buf = NULL;
+-        CMFormatDescriptionRef format = NULL;
+-        OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(NULL, finalBuffer, &format);
+-        if (err != noErr || !format) {
+-            MP_ERR(vo, "Failed to create format description: %d\n", (int)err);
+-            if (needsRelease)
+-                CVPixelBufferRelease(finalBuffer);
+-            if (pixbufNeedsRelease)
+-                CVPixelBufferRelease(pixbuf);
+-            mp_image_unrefp(&mpi);
+-            return false;
+-        }
+-        
+-        err = CMSampleBufferCreateReadyWithImageBuffer(NULL, finalBuffer, format, &info, &buf);
+-        CFRelease(format);
+-        
+-        if (err != noErr || !buf) {
+-            MP_ERR(vo, "Failed to create sample buffer: %d\n", (int)err);
++        if (!enqueue_pixel_buffer(vo, finalBuffer)) {
+             if (needsRelease)
+                 CVPixelBufferRelease(finalBuffer);
+             if (pixbufNeedsRelease)
+@@ -1047,18 +1066,6 @@ error:
+             return false;
+         }
+ 
+-        if (!timebase) {
+-            CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(buf, YES);
+-            CFDictionarySetValue(
+-                (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0),
+-                kCMSampleAttachmentKey_DisplayImmediately,
+-                kCFBooleanTrue
+-            );
+-        }
+-
+-        [p->displayLayer enqueueSampleBuffer:buf];
+-        CFRelease(buf);
+-        
+         // Release composited output buffer (always owned by us)
+         if (needsRelease)
+             CVPixelBufferRelease(finalBuffer);
+@@ -1197,6 +1204,9 @@ static int control(struct vo *vo, uint32_t request, void *data)
+         // To avoid a black flash during seeks, flush pending samples but keep
+         // the currently displayed image. For true reconfig/stop paths, we
+         // still clear the image via reconfig()/uninit().
++        // The last drawn frame belongs to the old position; VOCTRL_REDRAW must
++        // not composite and show it again before the first frame after the seek.
++        mp_image_unrefp(&p->next_image);
+         clear_subtitle_state(vo);
+         [p->displayLayer flush];
+         return VO_TRUE;
+@@ -1227,32 +1237,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
+             if (pixbuf) {
+                 CVPixelBufferRef composited = composite_frame(vo, pixbuf);
+                 if (composited) {
+-                    CMTimebaseRef timebase = [p->displayLayer controlTimebase];
+-                    CMTime presentationTime = timebase ? CMTimebaseGetTime(timebase) : kCMTimeInvalid;
+-                    CMSampleTimingInfo info = {
+-                        .presentationTimeStamp = presentationTime,
+-                        .duration = kCMTimeInvalid,
+-                        .decodeTimeStamp = kCMTimeInvalid
+-                    };
+-
+-                    CMFormatDescriptionRef format = NULL;
+-                    CMSampleBufferRef buf = NULL;
+-                    OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(NULL, composited, &format);
+-                    if (err == noErr && format) {
+-                        err = CMSampleBufferCreateReadyWithImageBuffer(NULL, composited, format, &info, &buf);
+-                        CFRelease(format);
+-                        if (err == noErr && buf) {
+-                            // Force immediate display while paused, even if the control timebase exists
+-                            CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(buf, YES);
+-                            CFDictionarySetValue(
+-                                (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0),
+-                                kCMSampleAttachmentKey_DisplayImmediately,
+-                                kCFBooleanTrue
+-                            );
+-                            [p->displayLayer enqueueSampleBuffer:buf];
+-                            CFRelease(buf);
+-                        }
+-                    }
++                    enqueue_pixel_buffer(vo, composited);
+                     CVPixelBufferRelease(composited);
+                 }
+ 
