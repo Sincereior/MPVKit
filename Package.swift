@@ -38,8 +38,8 @@ let package = Package(
         // Combined framework - includes libmpv, FFmpeg, and all dependencies
         .binaryTarget(
             name: "MPVKit",
-            url: "https://github.com/Sincereior/MPVKit/releases/download/0.41.0-av6/MPVKit.xcframework.zip",
-            checksum: "c419971c40d6c72c6c6a643b46fd3c113d3125aeae05646972b83a273be4a602"
+            url: "https://github.com/Sincereior/MPVKit/releases/download/0.41.0-av8/MPVKit.xcframework.zip",
+            checksum: "ac92a1851dabeb3e7e34e74d4379087f9c77c938ed6a6c1073b11f409a204ebf"
         ),
     ]
 )
