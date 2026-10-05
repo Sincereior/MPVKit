@@ -68,6 +68,28 @@ jobs:
           git push origin "HEAD:${{ github.ref_name }}"
           echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # The build takes half an hour: if the release step fails, the zip is still there to attach by hand.
+      - name: Keep the build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPVKit.xcframework
+          path: dist/MPVKit-combined/MPVKit.xcframework.zip
+          retention-days: 3
+          compression-level: 0
+
+      # A release (a draft is one too) or a tag left by an earlier try of this version makes the release step
+      # fail, or leaves the tag on a commit whose Package.swift names another checksum.
+      - name: Remove an earlier release of this version
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for id in $(gh api "repos/${{ github.repository }}/releases" --paginate --jq ".[] | select(.tag_name == \"$RELEASE_VERSION\") | .id"); do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
+          done
+          git push origin ":refs/tags/$RELEASE_VERSION" || true
+
       - name: Upload binary to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
