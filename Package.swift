@@ -39,7 +39,7 @@ let package = Package(
         .binaryTarget(
             name: "MPVKit",
             url: "https://github.com/Sincereior/MPVKit/releases/download/0.41.0-av9/MPVKit.xcframework.zip",
-            checksum: "37abcfea94c72b44716976884f2bba9dc13a4044788d104e8ef97d1ff63e9d63"
+            checksum: "da372538be0a1d1945cf5d4e53469801a0a69089c42105c272368e77ac833c0c"
         ),
     ]
 )
