@@ -1,5 +1,5 @@
 diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
-index 82259ce..9bf9e5e 100644
+index 82259ce..4358d75 100644
 --- a/video/out/vo_avfoundation.m
 +++ b/video/out/vo_avfoundation.m
 @@ -91,6 +91,11 @@ struct priv {
@@ -142,9 +142,9 @@ index 82259ce..9bf9e5e 100644
 +    struct mp_image *img = NULL;
 +
 +    @autoreleasepool {
-+        static CIContext *context;
-+        if (!context)
-+            context = [CIContext contextWithOptions:nil];
++        // Not kept in a static: this file is compiled without ARC, where an object that
++        // only this pool holds is gone when it ends, and the next screenshot crashed.
++        CIContext *context = [CIContext contextWithOptions:nil];
 +
 +        CVPixelBufferRef pixbuf = p->lastPixbuf;
 +        int w = (int)CVPixelBufferGetWidth(pixbuf);
