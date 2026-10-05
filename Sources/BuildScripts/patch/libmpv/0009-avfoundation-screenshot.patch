@@ -1,0 +1,250 @@
+diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
+index 82259ce..9bf9e5e 100644
+--- a/video/out/vo_avfoundation.m
++++ b/video/out/vo_avfoundation.m
+@@ -91,6 +91,11 @@ struct priv {
+ 
+     // Fixed subtitle render height in composite mode (0 = video height)
+     int osd_render_height;
++
++    // The video frame that was shown last, for screenshots. This vo does not
++    // retain frames (VO_CAP_NORETAIN), so mpv has no current frame to take a
++    // screenshot of and the vo has to answer VOCTRL_SCREENSHOT itself.
++    CVPixelBufferRef lastPixbuf;
+ };
+ 
+ // Helper to sync OSD layer frame with display layer bounds
+@@ -999,6 +1004,11 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+             pixbufNeedsRelease = true;
+         }
+         
++        // Kept for screenshots, see screenshot_image()
++        if (p->lastPixbuf)
++            CVPixelBufferRelease(p->lastPixbuf);
++        p->lastPixbuf = CVPixelBufferRetain(pixbuf);
++
+         CVPixelBufferRef finalBuffer = pixbuf;
+         bool needsRelease = false;
+ 
+@@ -1137,6 +1147,12 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
+     // won't resize to match the new video dimensions.
+     [p->displayLayer flushAndRemoveImage];
+     
++    // The last frame of the previous video is not a picture of this one
++    if (p->lastPixbuf) {
++        CVPixelBufferRelease(p->lastPixbuf);
++        p->lastPixbuf = NULL;
++    }
++
+     // Clear subtitles when video configuration changes
+     clear_subtitle_state(vo);
+     sync_osd_layer_frame(p);
+@@ -1149,6 +1165,10 @@ static void uninit(struct vo *vo)
+     struct priv *p = vo->priv;
+     
+     mp_image_unrefp(&p->next_image);
++    if (p->lastPixbuf) {
++        CVPixelBufferRelease(p->lastPixbuf);
++        p->lastPixbuf = NULL;
++    }
+     [p->displayLayer flushAndRemoveImage];
+     
+     if (p->cachedSubtitleImage) {
+@@ -1191,6 +1211,185 @@ static void uninit(struct vo *vo)
+     av_buffer_unref(&p->hwctx.av_device_ref);
+ }
+ 
++// Where the subtitles of a screenshot are drawn
++struct screenshot_osd {
++    CGContextRef context;
++    int h;
++};
++
++// Callback for osd_draw - draws subtitle bitmaps on the image of a screenshot
++static void screenshot_osd_cb(void *ctx, struct sub_bitmaps *imgs)
++{
++    struct screenshot_osd *shot = ctx;
++
++    if (!imgs || imgs->num_parts == 0)
++        return;
++
++    CGColorSpaceRef partColorSpace = (imgs->format == SUBBITMAP_BGRA)
++        ? CGColorSpaceCreateDeviceRGB() : NULL;
++
++    for (int i = 0; i < imgs->num_parts; i++) {
++        struct sub_bitmap *sb = &imgs->parts[i];
++
++        if (!sb->bitmap || sb->w <= 0 || sb->h <= 0)
++            continue;
++
++        CGDataProviderRef provider = CGDataProviderCreateWithData(
++            NULL, sb->bitmap, sb->stride * sb->h, NULL);
++
++        if (!provider)
++            continue;
++
++        // sb->x, sb->y are in mpv coords (origin top-left), CG's is bottom-left
++        CGRect destRect = CGRectMake(sb->x, shot->h - sb->y - sb->dh, sb->dw, sb->dh);
++
++        if (imgs->format == SUBBITMAP_BGRA) {
++            CGImageRef partImage = CGImageCreate(
++                sb->w, sb->h, 8, 32, sb->stride, partColorSpace,
++                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
++                provider, NULL, false, kCGRenderingIntentDefault);
++
++            if (partImage) {
++                CGContextDrawImage(shot->context, destRect, partImage);
++                CGImageRelease(partImage);
++            }
++        } else if (imgs->format == SUBBITMAP_LIBASS) {
++            CGFloat decode[] = {1, 0};
++            CGImageRef mask = CGImageMaskCreate(
++                sb->w, sb->h, 8, 8, sb->stride, provider, decode, false);
++
++            if (mask) {
++                CGContextSaveGState(shot->context);
++                CGContextClipToMask(shot->context, destRect, mask);
++
++                uint32_t c = sb->libass.color;
++                float r = ((c >> 24) & 0xFF) / 255.0f;
++                float g = ((c >> 16) & 0xFF) / 255.0f;
++                float b = ((c >> 8) & 0xFF) / 255.0f;
++                float a = 1.0f - ((c >> 0) & 0xFF) / 255.0f;
++
++                CGContextSetRGBFillColor(shot->context, r, g, b, a);
++                CGContextFillRect(shot->context, destRect);
++                CGContextRestoreGState(shot->context);
++                CGImageRelease(mask);
++            }
++        }
++
++        CGDataProviderRelease(provider);
++    }
++
++    if (partColorSpace)
++        CGColorSpaceRelease(partColorSpace);
++}
++
++// The picture for a screenshot: the video frame that was shown last, at the size
++// it is shown, as a BGRA image mpv can write, with the subtitles and the OSD
++// drawn on it when they are asked for.
++//
++// mpv takes the frame of a vo with vo_get_current_frame(), which is none for a vo
++// that does not retain its frames, as this one: the screenshot failed for that,
++// without a word. NULL when there is no frame yet.
++static struct mp_image *screenshot_image(struct vo *vo, bool subs, bool osd)
++{
++    struct priv *p = vo->priv;
++
++    if (!p->lastPixbuf || !vo->params)
++        return NULL;
++
++    struct mp_image *img = NULL;
++
++    @autoreleasepool {
++        static CIContext *context;
++        if (!context)
++            context = [CIContext contextWithOptions:nil];
++
++        CVPixelBufferRef pixbuf = p->lastPixbuf;
++        int w = (int)CVPixelBufferGetWidth(pixbuf);
++        int h = (int)CVPixelBufferGetHeight(pixbuf);
++
++        // A video with pixels that are not square is shown wider or taller
++        int dw = w;
++        int dh = h;
++        if (vo->params->p_w > 0 && vo->params->p_h > 0) {
++            if (vo->params->p_w > vo->params->p_h)
++                dw = (int)((int64_t)w * vo->params->p_w / vo->params->p_h);
++            else
++                dh = (int)((int64_t)h * vo->params->p_h / vo->params->p_w);
++        }
++
++        if (!context || w <= 0 || h <= 0 || dw <= 0 || dh <= 0)
++            return NULL;
++
++        CIImage *source = [CIImage imageWithCVPixelBuffer:pixbuf];
++        if (!source)
++            return NULL;
++
++        if (dw != w || dh != h) {
++            source = [source imageByApplyingTransform:
++                CGAffineTransformMakeScale((CGFloat)dw / w, (CGFloat)dh / h)];
++        }
++
++        CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
++        if (!colorSpace)
++            return NULL;
++
++        img = mp_image_alloc(IMGFMT_BGRA, dw, dh);
++        if (!img) {
++            CGColorSpaceRelease(colorSpace);
++            return NULL;
++        }
++
++        [context render:source
++               toBitmap:img->planes[0]
++               rowBytes:img->stride[0]
++                 bounds:CGRectMake(0, 0, dw, dh)
++                 format:kCIFormatBGRA8
++             colorSpace:colorSpace];
++
++        struct mp_image_params params = {
++            .imgfmt = IMGFMT_BGRA,
++            .w = dw,
++            .h = dh,
++            .p_w = 1,
++            .p_h = 1,
++        };
++        mp_image_params_guess_csp(&params);
++        img->params = params;
++
++        if ((subs || osd) && vo->osd) {
++            CGContextRef bitmap = CGBitmapContextCreate(
++                img->planes[0], dw, dh, 8, img->stride[0], colorSpace,
++                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
++
++            if (bitmap) {
++                struct screenshot_osd shot = {
++                    .context = bitmap,
++                    .h = dh,
++                };
++                struct mp_osd_res osd_res = {
++                    .w = dw,
++                    .h = dh,
++                    .display_par = 1.0,
++                };
++                static const bool formats[SUBBITMAP_COUNT] = {
++                    [SUBBITMAP_BGRA] = true,
++                    [SUBBITMAP_LIBASS] = true,
++                };
++                int flags = (subs && osd) ? 0
++                          : subs ? OSD_DRAW_SUB_ONLY : OSD_DRAW_OSD_ONLY;
++
++                osd_draw(vo->osd, osd_res, p->next_pts, flags, formats,
++                         screenshot_osd_cb, &shot);
++                CGContextRelease(bitmap);
++            }
++        }
++
++        CGColorSpaceRelease(colorSpace);
++    }
++
++    return img;
++}
++
+ static int control(struct vo *vo, uint32_t request, void *data)
+ {
+     struct priv *p = vo->priv;
+@@ -1249,6 +1448,11 @@ static int control(struct vo *vo, uint32_t request, void *data)
+         return VO_TRUE;
+     case VOCTRL_UPDATE_WINDOW_TITLE:
+         return VO_TRUE;
++    case VOCTRL_SCREENSHOT: {
++        struct voctrl_screenshot *ctrl = data;
++        ctrl->res = screenshot_image(vo, ctrl->subs, ctrl->osd);
++        return ctrl->res ? VO_TRUE : VO_NOTIMPL;
++    }
+     }
+     return VO_NOTIMPL;
+ }
